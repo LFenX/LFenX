@@ -1,7 +1,18 @@
 <div align="center">
-  <h1>LFen</h1>
-  <p><strong>Aspiring to become an AI full-stack developer.</strong></p>
-  <p>Exploring computer science, cybersecurity, machine learning, reinforcement learning, data science, and AI full-stack development.</p>
+  <img src="https://readme-typing-svg.herokuapp.com?font=Cascadia+Code&weight=700&size=17&color=0078D7&center=true&vCenter=true&pause=100000&width=680&lines=Hi%2C+I'm+LFen.+Aspiring+AI+Full-Stack+Developer" alt="Hi, I'm LFen. Aspiring AI Full-Stack Developer" />
+
+  <p>
+    👋 <strong>Aspiring to become an AI full-stack developer.</strong>
+  </p>
+
+  <p>
+    <code>🎯 Computer Science</code>
+    <code>🛡️ Cybersecurity</code>
+    <code>🧠 Machine Learning</code>
+    <code>🤖 Reinforcement Learning</code>
+    <code>📊 Data Science</code>
+    <code>🧩 AI Full-Stack Development</code>
+  </p>
 
   <p>
     <a href="https://github.com/LFenX">
@@ -12,37 +23,58 @@
     </a>
   </p>
 </div>
----
 
-## 👋 About me
+<table>
+<tr>
+<td valign="top" width="50%">
 
-- 🎯 Aspiring to become an **AI full-stack developer**
-- 🧠 Deeply interested in **computer science, cybersecurity, machine learning, reinforcement learning, data science, and AI full-stack development**
+#### 👋 About me
 
-> **just do it.**
+- Curious about how software, data, security, and intelligence fit together.
+- Learning by building and experimenting across the stack.
+- Turning complex ideas into clear, useful systems.
 
-## 🔭 Areas I care about
+</td>
+<td valign="top" width="48%">
 
-`Computer Science` · `Cybersecurity` · `Machine Learning` · `Reinforcement Learning` · `Data Science` · `AI Full-Stack Development`
+#### 🧭 Current direction
 
-## 🛠️ Toolbox
+- **Full-stack development** — from interface to backend and deployment
+- **Intelligent systems** — machine learning, reinforcement learning, and AI
+- **Secure engineering** — keeping security in mind throughout the stack
+- **Data** — transforming data into insight and useful products
+
+</td>
+</tr>
+</table>
+
+## 🧰 Toolbox
 
 <p>
-  <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Next.js-000000?style=flat-square&logo=next.js&logoColor=white" alt="Next.js" />
-  <img src="https://img.shields.io/badge/React-20232A?style=flat-square&logo=react&logoColor=61DAFB" alt="React" />
-  <img src="https://img.shields.io/badge/Tailwind_CSS-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind CSS" />
-  <img src="https://img.shields.io/badge/Prisma-2D3748?style=flat-square&logo=prisma&logoColor=white" alt="Prisma" />
-  <img src="https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
-  <img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=111827" alt="JavaScript" />
-  <img src="https://img.shields.io/badge/Java-ED8B00?style=flat-square&logo=openjdk&logoColor=white" alt="Java" />
+  <code>TypeScript</code>
+  <code>Next.js</code>
+  <code>React</code>
+  <code>Tailwind CSS</code>
+  <code>Prisma</code>
+  <code>PostgreSQL</code>
+  <code>Python</code>
+  <code>JavaScript</code>
+  <code>Java</code>
 </p>
 
-## 📌 Find me
+## 📚 Learning map
 
-- GitHub: [@LFenX](https://github.com/LFenX)
+<p>
+  <code>Computer Science</code>
+  <code>Cybersecurity</code>
+  <code>Machine Learning</code>
+  <code>Reinforcement Learning</code>
+  <code>Data Science</code>
+  <code>AI Full-Stack Development</code>
+</p>
 
 <div align="center">
-  <sub>Build small. Ship useful. Keep learning.</sub>
+  <a href="https://github.com/LFenX">GitHub · @LFenX</a>
+  <br />
+  <sub>Build small. Learn deeply. Ship thoughtfully.</sub>
 </div>
