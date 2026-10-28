@@ -22,17 +22,51 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Check metrics credentials
+      - name: Check metrics access
         id: credentials
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           METRICS_TOKEN: ${{ secrets.METRICS_TOKEN }}
-        run: |
-          if [[ -n "$METRICS_TOKEN" ]]; then
-            echo 'available=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-            echo '::notice::Add a scopeless personal access token as METRICS_TOKEN in this repository to enable metrics.'
-          fi
+        with:
+          github-token: ${{ secrets.METRICS_TOKEN || github.token }}
+          script: |
+            core.setOutput('available', 'false');
+            if (!process.env.METRICS_TOKEN) {
+              core.notice('Configure a classic personal access token with repo scope as METRICS_TOKEN to include private repositories.');
+              return;
+            }
+            const { data: account, headers } = await github.rest.users.getAuthenticated();
+            if (account.login.toLowerCase() !== 'lfenx') {
+              throw new Error('METRICS_TOKEN must belong to LFenX.');
+            }
+            const scopes = (headers['x-oauth-scopes'] || '').split(',').map(scope => scope.trim());
+            if (!scopes.includes('repo')) {
+              core.notice('METRICS_TOKEN needs repo scope before statistics can include all owned private repositories. The current card is preserved.');
+              return;
+            }
+            const { viewer } = await github.graphql(`
+              query OwnedRepositoryCoverage {
+                viewer {
+                  repositories(first: 100, affiliations: [OWNER], ownerAffiliations: [OWNER]) {
+                    totalCount
+                    pageInfo { hasNextPage }
+                    nodes { name nameWithOwner isPrivate }
+                  }
+                }
+              }
+            `);
+            const { nodes, totalCount, pageInfo } = viewer.repositories;
+            for (const repository of nodes.filter(repository => repository.isPrivate)) {
+              core.setSecret(repository.nameWithOwner);
+              core.setSecret(repository.name);
+            }
+            if (pageInfo.hasNextPage || nodes.length !== totalCount) {
+              throw new Error('Complete owned-repository coverage could not be verified. The current card is preserved.');
+            }
+            const privateCount = nodes.filter(repository => repository.isPrivate).length;
+            core.info(`Owned repositories: ${totalCount} (${totalCount - privateCount} public, ${privateCount} private).`);
+            core.setOutput('repositories', Math.max(totalCount, 1));
+            core.setOutput('available', 'true');
 
       - name: Generate GitHub metrics
         if: steps.credentials.outputs.available == 'true'
@@ -45,7 +79,9 @@ jobs:
           committer_branch: main
           template: classic
           base: header, activity, community, repositories, metadata
-          repositories_forks: 'no'
+          repositories: ${{ steps.credentials.outputs.repositories }}
+          repositories_affiliations: owner
+          repositories_forks: 'yes'
           config_timezone: Asia/Shanghai
           config_animations: 'no'
           extras_js: |
