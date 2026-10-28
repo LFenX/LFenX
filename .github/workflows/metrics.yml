@@ -83,7 +83,7 @@ jobs:
             }
             let response;
             try {
-              response = await fetch('https://wakatime.com/api/v1/users/current/stats/last_7_days', {
+              response = await fetch('https://api.wakatime.com/api/v1/users/current/stats/last_7_days', {
                 headers: { Authorization: `Bearer ${token}` },
                 signal: AbortSignal.timeout(30000)
               });
@@ -105,6 +105,32 @@ jobs:
             }
             if (stats.is_up_to_date === false) {
               core.notice('WakaTime is still processing recent activity; the card will use the latest available statistics.');
+            }
+            core.info('WakaTime stats diagnostic: ' + JSON.stringify({
+              username: stats.username, range: stats.range, start: stats.start, end: stats.end,
+              timezone: stats.timezone, status: stats.status, is_up_to_date: stats.is_up_to_date,
+              percent_calculated: stats.percent_calculated, total_seconds: total,
+              languages: stats.languages?.length, editors: stats.editors?.length,
+              projects: stats.projects?.length
+            }));
+            if (total === 0) {
+              for (const range of ['all_time', 'last_30_days']) {
+                const probe = await fetch(`https://api.wakatime.com/api/v1/users/current/stats/${range}`, {
+                  headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30000)
+                });
+                if (!probe.ok) {
+                  core.info(`WakaTime ${range} diagnostic: HTTP ${probe.status}`);
+                  continue;
+                }
+                const { data: sample } = await probe.json();
+                core.info(`WakaTime ${range} diagnostic: ` + JSON.stringify({
+                  username: sample?.username, range: sample?.range, start: sample?.start, end: sample?.end,
+                  status: sample?.status, is_up_to_date: sample?.is_up_to_date,
+                  total_seconds: sample?.total_seconds_including_other_language ?? sample?.total_seconds,
+                  languages: sample?.languages?.length, editors: sample?.editors?.length,
+                  keys: Object.keys(sample || {})
+                }));
+              }
             }
             core.info('WakaTime statistics are available. Only public GitHub project names will be displayed.');
             core.setOutput('available', 'true');
@@ -136,6 +162,7 @@ jobs:
           plugin_languages_limit: 8
           plugin_wakatime: ${{ steps.wakatime.outputs.available == 'true' }}
           plugin_wakatime_token: ${{ secrets.WAKATIME_TOKEN }}
+          plugin_wakatime_url: https://api.wakatime.com
           plugin_wakatime_user: current
           plugin_wakatime_days: 7
           plugin_wakatime_sections: time, projects, projects-graphs, languages, languages-graphs, editors, editors-graphs, os, os-graphs
