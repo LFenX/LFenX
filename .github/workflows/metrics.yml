@@ -1,0 +1,89 @@
+name: Profile metrics
+
+on:
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/metrics.yml'
+
+concurrency:
+  group: profile-metrics
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  metrics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check metrics credentials
+        id: credentials
+        env:
+          METRICS_TOKEN: ${{ secrets.METRICS_TOKEN }}
+        run: |
+          if [[ -n "$METRICS_TOKEN" ]]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Add a scopeless personal access token as METRICS_TOKEN in this repository to enable metrics.'
+          fi
+
+      - name: Generate GitHub metrics
+        if: steps.credentials.outputs.available == 'true'
+        uses: lowlighter/metrics@65836723097537a54cd8eb90f61839426b4266b6
+        with:
+          user: LFenX
+          filename: github-metrics.svg
+          token: ${{ secrets.METRICS_TOKEN }}
+          committer_token: ${{ github.token }}
+          committer_branch: main
+          template: classic
+          base: header, activity, community, repositories, metadata
+          repositories_forks: 'no'
+          config_timezone: Asia/Shanghai
+          config_animations: 'no'
+          plugin_languages: 'yes'
+          plugin_languages_details: percentage
+          plugin_languages_sections: most-used
+          plugin_languages_indepth: 'no'
+          plugin_languages_limit: 8
+          plugins_errors_fatal: 'yes'
+          retries: 2
+          retries_delay: 30
+
+      - name: Add generated metrics to the profile
+        if: steps.credentials.outputs.available == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            const repo = { ...context.repo, ref: 'main' };
+            const { data: metrics } = await github.rest.repos.getContent({
+              ...repo, path: 'github-metrics.svg'
+            });
+            if (Array.isArray(metrics) || metrics.type !== 'file' || !metrics.size) {
+              throw new Error('A generated metrics image is required before updating the README.');
+            }
+            const { data: file } = await github.rest.repos.getContent({
+              ...repo, path: 'README.md'
+            });
+            if (Array.isArray(file) || file.type !== 'file' || !file.content) {
+              throw new Error('README.md is not an editable file.');
+            }
+            const readme = Buffer.from(file.content, 'base64').toString('utf8');
+            if (!readme.includes('](github-metrics.svg)')) {
+              const updated = readme.trimEnd() + '\n\n![GitHub metrics](github-metrics.svg)\n';
+              await github.rest.repos.createOrUpdateFileContents({
+                ...context.repo,
+                path: 'README.md',
+                branch: 'main',
+                sha: file.sha,
+                message: 'Display generated profile metrics',
+                content: Buffer.from(updated).toString('base64')
+              });
+            }
