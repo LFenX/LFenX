@@ -118,23 +118,19 @@ jobs:
             if (Number.isFinite(source.cumulative_total?.seconds) && Math.abs(total - source.cumulative_total.seconds) > 1) {
               throw new Error('WakaTime cumulative and daily totals disagree. The current card is preserved.');
             }
-            const repos = await github.paginate(github.rest.repos.listForUser, {
-              username: 'LFenX', type: 'owner', per_page: 100
-            });
-            const publicNames = new Set(repos.filter(repo => !repo.private && repo.owner?.login?.toLowerCase() === 'lfenx')
-              .map(repo => repo.name.toLowerCase()));
             const number = value => Number.isFinite(value) && value >= 0 ? value : 0;
             const sumField = key => days.reduce((sum, day) => sum + number(day.grand_total[key]), 0);
-            function series(key, publicOnly = false) {
+            function series(key, activityTotal) {
               const sums = new Map();
               for (const day of days) {
                 for (const item of day[key] || []) {
-                  if (typeof item.name !== 'string' || (publicOnly && !publicNames.has(item.name.toLowerCase()))) continue;
+                  if (typeof item.name !== 'string' || !item.name.trim()) continue;
                   sums.set(item.name, (sums.get(item.name) || 0) + number(item.total_seconds));
                 }
               }
-              const denominator = publicOnly ? total : [...sums.values()].reduce((sum, seconds) => sum + seconds, 0);
-              return [...sums].map(([name, seconds]) => ({name, seconds, percent: denominator ? seconds * 100 / denominator : 0}))
+              const denominator = activityTotal ?? [...sums.values()].reduce((sum, seconds) => sum + seconds, 0);
+              return [...sums].filter(([, seconds]) => seconds > 0)
+                .map(([name, seconds]) => ({name, seconds, percent: denominator ? seconds * 100 / denominator : 0}))
                 .sort((a, b) => b.seconds - a.seconds || a.name.localeCompare(b.name));
             }
             const models = new Map();
@@ -156,7 +152,7 @@ jobs:
               daily_average: activeDays ? total / activeDays : 0, active_days: activeDays,
               best_day: [...daily].sort((a, b) => b.seconds - a.seconds)[0], daily,
               languages: series('languages'), editors: series('editors'), os: series('operating_systems'),
-              categories: series('categories'), projects: series('projects', true),
+              categories: series('categories'), projects: series('projects', total),
               ai: Object.fromEntries(['ai_additions', 'ai_deletions', 'human_additions', 'human_deletions',
                 'ai_input_tokens', 'ai_cached_input_tokens', 'ai_output_tokens', 'ai_prompt_events_total',
                 'ai_prompt_length_sum', 'ai_sessions', 'ai_model_total_cost'].map(key => [key, sumField(key)])),
@@ -164,7 +160,7 @@ jobs:
             };
             core.setOutput('payload', Buffer.from(JSON.stringify(payload)).toString('base64'));
             core.setOutput('available', 'true');
-            core.info(`WakaTime summaries verified: ${days.length} days, ${Math.floor(total / 3600)}h ${Math.floor(total % 3600 / 60)}m including today; ${payload.projects.length} public projects.`);
+            core.info(`WakaTime summaries verified: ${days.length} days, ${Math.floor(total / 3600)}h ${Math.floor(total % 3600 / 60)}m including today; ${payload.projects.length} active projects.`);
 
       - name: Generate GitHub metrics
         if: steps.credentials.outputs.available == 'true'
@@ -196,6 +192,7 @@ jobs:
           retries_delay: 30
 
       - name: Render WakaTime summaries
+        id: render
         if: steps.credentials.outputs.available == 'true' && steps.wakatime.outputs.available == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
@@ -240,63 +237,101 @@ jobs:
             const charts = [
               ['Language activity', data.languages], ['Code editors', data.editors],
               ['Operating systems', data.os], ['Activity categories', data.categories],
-              ['Public projects', data.projects], ['Daily activity', data.daily],
-              ['AI models by line changes', data.models.map(model => ({name: model.name, percent: modelTotal ? model.lines * 100 / modelTotal : 0}))],
+              ['Active projects', data.projects], ['Daily activity', data.daily],
+              ['AI models by line changes', data.models.map(model => ({name: model.name, percent: modelTotal ? model.lines * 100 / modelTotal : 0, lines: model.lines}))],
               ['Estimated AI cost by model', data.models.map(model => ({name: model.name, percent: costTotal ? model.cost * 100 / costTotal : 0, cost: model.cost}))]
             ];
-            const layout = {heading: 24, field: 20, chartGap: 12, chartHeading: 24, entry: 20, top: 12, bottom: 8};
-            let sectionHeight = layout.heading + Math.ceil(fields.length / 2) * layout.field;
-            const chartMarkup = [];
-            for (let index = 0; index < charts.length; index += 2) {
-              const pair = charts.slice(index, index + 2);
-              sectionHeight += layout.chartGap + layout.chartHeading + Math.max(...pair.map(([, entries]) => Math.max(entries.length, 1))) * layout.entry;
-              chartMarkup.push(`<div class="waka-chart-row">${pair.map(([title, entries]) =>
-                `<div class="waka-chart"><h3>${escape(title)}</h3><div class="waka-bars">${entries.length ? entries.map(item => {
-                  const percent = Math.max(0, Math.min(100, item.percent));
-                  const value = item.cost === undefined ? `${Math.round(percent)}%` : `$${item.cost.toFixed(2)}`;
-                  return `<div class="entry" title="${escape(item.seconds === undefined ? value : duration(item.seconds))}"><span class="name" title="${escape(item.name)}">${escape(item.name)}</span><span class="waka-track"><span class="waka-bar" style="width:${percent.toFixed(4)}%"></span></span><span class="value">${escape(value)}</span></div>`;
-                }).join('') : '<div class="waka-empty">No activity in this period</div>'}</div></div>`
-              ).join('')}</div>`);
+            const layout = {width: 900, columns: 3, gap: 16, heading: 26, field: 20, chartGap: 14, chartHeading: 24, line: 18, detail: 17, top: 12, bottom: 8};
+            const nameWidth = (layout.width - layout.gap * 2) / layout.columns - 60;
+            function wrapName(name) {
+              const lines = [];
+              let line = '', pixels = 0;
+              for (const character of name) {
+                const width = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(character) ? 14
+                  : /[MW@#%]/.test(character) ? 12 : /[ilI.,'|! ]/.test(character) ? 4 : 9;
+                if (line && pixels + width > nameWidth) { lines.push(line); line = ''; pixels = 0; }
+                line += character; pixels += width;
+              }
+              if (line || !lines.length) lines.push(line);
+              return lines;
             }
+            const columns = Array.from({length: layout.columns}, () => ({height: 0, charts: []}));
+            for (const [title, entries] of charts) {
+              let height = layout.chartHeading;
+              const markup = entries.length ? entries.map(item => {
+                const percent = Math.max(0, Math.min(100, item.percent));
+                const lines = wrapName(item.name);
+                const entryHeight = lines.length * layout.line + layout.detail + 3;
+                height += entryHeight;
+                const value = item.cost === undefined ? `${percent.toFixed(2)}%` : `$${item.cost.toFixed(2)}`;
+                const detail = item.seconds !== undefined ? duration(item.seconds)
+                  : item.lines !== undefined ? `${compact(item.lines)} line changes` : 'Estimated cost';
+                return `<div class="entry" style="height:${entryHeight}px"><div class="waka-label"><span class="name" title="${escape(item.name)}">${lines.map(escape).join('<br/>')}</span><span class="value">${escape(value)}</span></div><div class="waka-detail"><span class="duration">${escape(detail)}</span><span class="waka-track"><span class="waka-bar" style="width:${percent.toFixed(4)}%"></span></span></div></div>`;
+              }).join('') : (height += layout.line, '<div class="waka-empty">No activity in this period</div>');
+              const column = columns.reduce((lowest, next) => next.height < lowest.height ? next : lowest);
+              if (column.charts.length) column.height += layout.chartGap;
+              column.height += height;
+              column.charts.push(`<div class="waka-chart" style="height:${height}px"><h3>${escape(title)}</h3>${markup}</div>`);
+            }
+            const sectionHeight = layout.heading + Math.ceil(fields.length / layout.columns) * layout.field
+              + layout.chartGap + Math.max(...columns.map(column => column.height));
             const style = `<style id="wakatime-summary-style" type="text/css"><![CDATA[
+            .items-wrapper{width:100%;box-sizing:border-box}
+            .items-wrapper>section.column>svg.bar{width:calc(100% - 16px);height:8px;max-width:none}
             .wakatime-summary{display:block!important;box-sizing:border-box;margin:${layout.top}px 0 0!important;padding:0!important;height:${sectionHeight}px;font-family:inherit;font-size:13px;line-height:20px;color:inherit}
             .wakatime-summary h2{height:${layout.heading}px;line-height:${layout.heading}px;padding:0!important;margin:0!important;font-size:16px;font-weight:400;color:#00f}
-            .wakatime-summary .waka-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:12px}
-            .wakatime-summary .waka-field{height:${layout.field}px;line-height:${layout.field}px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-            .wakatime-summary .waka-chart-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:12px;margin-top:${layout.chartGap}px}
+            .wakatime-summary .waka-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));column-gap:${layout.gap}px}
+            .wakatime-summary .waka-field{height:${layout.field}px;line-height:${layout.field}px;white-space:nowrap}
+            .wakatime-summary .waka-columns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));column-gap:${layout.gap}px;margin-top:${layout.chartGap}px}
+            .wakatime-summary .waka-chart+.waka-chart{margin-top:${layout.chartGap}px}
             .wakatime-summary h3{height:${layout.chartHeading}px;line-height:${layout.chartHeading}px;margin:0!important;padding:0!important;font-size:13px;font-weight:400;color:#00f}
-            .wakatime-summary .entry{display:grid;grid-template-columns:minmax(0,95px) minmax(0,1fr) 43px;column-gap:4px;height:${layout.entry}px;line-height:${layout.entry}px;margin:0;padding:0;align-items:center}
-            .wakatime-summary .name{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-            .wakatime-summary .value{text-align:right;white-space:nowrap;font-size:11px}
-            .wakatime-summary .waka-track{display:block;height:7px;border-radius:2px;background:rgba(68,149,74,.12)}
-            .wakatime-summary .waka-bar{display:block;height:7px;border-radius:2px;background:#44954a}
-            .wakatime-summary .waka-empty{height:${layout.entry}px;line-height:${layout.entry}px;font-size:12px}
+            .wakatime-summary .entry{display:block;box-sizing:border-box;margin:0;padding:0;font-size:13px;line-height:${layout.line}px}
+            .wakatime-summary .waka-label{display:grid;grid-template-columns:minmax(0,1fr) 52px;column-gap:8px;align-items:start}
+            .wakatime-summary .name{display:block;white-space:normal;overflow-wrap:anywhere;line-height:${layout.line}px}
+            .wakatime-summary .value{text-align:right;white-space:nowrap;font-size:11px;line-height:${layout.line}px}
+            .wakatime-summary .waka-detail{display:flex;align-items:center;gap:8px;height:${layout.detail}px;line-height:${layout.detail}px;font-size:11px}
+            .wakatime-summary .duration{white-space:nowrap}
+            .wakatime-summary .waka-track{display:block;flex:1;height:5px;border-radius:2px;background:rgba(68,149,74,.12)}
+            .wakatime-summary .waka-bar{display:block;height:5px;border-radius:2px;background:#44954a}
+            .wakatime-summary .waka-empty{height:${layout.line}px;line-height:${layout.line}px;font-size:12px}
             ]]></style>`;
-            const markup = `<!-- WAKATIME:START --><section class="wakatime-summary"><h2>WakaTime (last 7 days, including today)</h2><div class="waka-fields">${fields.map(field => `<div class="waka-field" title="${escape(field)}">${escape(field)}</div>`).join('')}</div>${chartMarkup.join('')}</section><!-- WAKATIME:END -->`;
+            const markup = `<!-- WAKATIME:START --><section class="wakatime-summary"><h2>WakaTime (last 7 days, including today)</h2><div class="waka-fields">${fields.map(field => `<div class="waka-field">${escape(field)}</div>`).join('')}</div><div class="waka-columns">${columns.map(column => `<div class="waka-column">${column.charts.join('')}</div>`).join('')}</div></section><!-- WAKATIME:END -->`;
             const height = baseHeight + layout.top + sectionHeight + layout.bottom;
             svg = svg.replace(/<svg\b[^>]*>/, tag => {
-              let updated = tag.replace(/\bheight="\d+"/, `height="${height}"`);
+              let updated = tag.replace(/\bwidth="\d+"/, `width="${layout.width}"`).replace(/\bheight="\d+"/, `height="${height}"`);
+              updated = updated.replace(/\sviewBox="[^"]*"/, '');
               if (!updated.includes('data-wakatime-base-height=')) updated = updated.replace(/>$/, ` data-wakatime-base-height="${baseHeight}">`);
-              return updated;
+              return updated.replace(/>$/, ` viewBox="0 0 ${layout.width} ${height}">`);
+            }).replace(/<svg\b[^>]*\bclass="bar"[^>]*>/g, tag => {
+              if (tag.includes('viewBox=')) return tag;
+              const width = tag.match(/\bwidth="([\d.]+)"/)?.[1], height = tag.match(/\bheight="([\d.]+)"/)?.[1];
+              return width && height ? tag.replace(/>$/, ` viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">`) : tag;
             }).replace('</defs>', `</defs>${style}`).replace('<footer', `${markup}<footer`);
             if (!svg.includes('class="wakatime-summary"') || !svg.includes(`Total: ${duration(data.total_seconds)}`)) {
               throw new Error('The completed WakaTime card did not pass its content check.');
             }
+            let revision;
             if (svg !== original) {
-              await github.rest.repos.createOrUpdateFileContents({
+              const {data: saved} = await github.rest.repos.createOrUpdateFileContents({
                 ...context.repo, path: target.path, branch: 'main', sha: file.sha,
                 message: 'Update WakaTime summaries in profile metrics [Skip GitHub Action]',
                 content: Buffer.from(svg).toString('base64')
               });
+              revision = saved.commit.sha;
+            } else {
+              const {data: commit} = await github.rest.repos.getCommit({...context.repo, ref: 'main'});
+              revision = commit.sha;
             }
-            core.info(`Published WakaTime summaries: ${duration(data.total_seconds)} including today; ${charts.length} complete distributions.`);
+            core.setOutput('revision', revision);
+            core.info(`Published WakaTime summaries: ${duration(data.total_seconds)} including today; ${charts.length} complete distributions; ${data.projects.length} active projects; ${layout.columns} columns.`);
 
       - name: Add generated metrics to the profile
         if: steps.credentials.outputs.available == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         with:
           script: |
-            const repo = { ...context.repo, ref: 'main' };
+            const generatedRevision = '${{ steps.render.outputs.revision }}';
+            const repo = { ...context.repo, ref: generatedRevision || 'main' };
             const { data: metrics } = await github.rest.repos.getContent({
               ...repo, path: 'github-metrics.svg'
             });
@@ -316,15 +351,20 @@ jobs:
                 throw new Error('The WakaTime section is missing from the generated card.');
               }
             }
+            let imageRevision = generatedRevision;
             if (image !== originalImage) {
-              await github.rest.repos.createOrUpdateFileContents({
+              const { data: savedImage } = await github.rest.repos.createOrUpdateFileContents({
                 ...context.repo, path: 'github-metrics.svg', branch: 'main', sha: metrics.sha,
                 message: 'Keep the Singapore-time profile footer [Skip GitHub Action]',
                 content: Buffer.from(image).toString('base64')
               });
+              imageRevision = savedImage.commit.sha;
             }
             core.info('Profile footer verified: Singapore time (UTC+08:00); contribution note removed.');
-            const { data: revision } = await github.rest.repos.getCommit(repo);
+            if (!imageRevision) {
+              const { data: revision } = await github.rest.repos.getCommit({...context.repo, ref: 'main'});
+              imageRevision = revision.sha;
+            }
             const { data: file } = await github.rest.repos.getContent({
               ...repo, path: 'README.md'
             });
@@ -332,7 +372,7 @@ jobs:
               throw new Error('README.md is not an editable file.');
             }
             const readme = Buffer.from(file.content, 'base64').toString('utf8');
-            const imageReference = `![GitHub metrics](https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/${revision.sha}/github-metrics.svg)`;
+            const imageReference = `![GitHub metrics](https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/${imageRevision}/github-metrics.svg)`;
             const existingImage = /!\[GitHub metrics\]\([^)]+\)/;
             const updated = existingImage.test(readme)
               ? readme.replace(existingImage, imageReference)
