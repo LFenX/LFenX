@@ -48,6 +48,10 @@ jobs:
           repositories_forks: 'no'
           config_timezone: Asia/Shanghai
           config_animations: 'no'
+          extras_js: |
+            const contributionNote = [...document.querySelectorAll('footer > span')]
+              .find(element => element.textContent.startsWith('These metrics '));
+            contributionNote?.remove();
           plugin_languages: 'yes'
           plugin_languages_details: percentage
           plugin_languages_sections: most-used
