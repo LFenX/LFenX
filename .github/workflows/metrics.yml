@@ -186,76 +186,6 @@ jobs:
             const contributionNote = [...document.querySelectorAll('footer > span')]
               .find(element => element.textContent.startsWith('These metrics '));
             contributionNote?.remove();
-            const encodedWakaTime = '${{ steps.wakatime.outputs.payload }}';
-            if (encodedWakaTime) {
-              const data = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(encodedWakaTime), char => char.charCodeAt(0))));
-              const make = (tag, className, text) => {
-                const node = document.createElement(tag);
-                if (className) node.className = className;
-                if (text !== undefined) node.textContent = text;
-                return node;
-              };
-              const duration = seconds => {
-                const minutes = Math.floor(seconds / 60);
-                return minutes >= 60 ? `${Math.floor(minutes / 60)} hrs ${minutes % 60} mins` : `${minutes} mins`;
-              };
-              const compact = value => new Intl.NumberFormat('en', {notation: 'compact', maximumFractionDigits: 1}).format(value);
-              const section = make('section', 'wakatime-summary');
-              section.append(make('h2', 'field', 'WakaTime (last 7 days, including today)'));
-              const fields = [
-                `Total: ${duration(data.total_seconds)}`, `Today: ${duration(data.today_seconds)}`,
-                `Daily average: ${duration(data.daily_average)}`, `Active days: ${data.active_days} / 7`,
-                `Best day: ${data.best_day.name}`, `Best day time: ${duration(data.best_day.seconds)}`,
-                `AI line changes: ${compact(data.ai.ai_additions + data.ai.ai_deletions)}`,
-                `Human line changes: ${compact(data.ai.human_additions + data.ai.human_deletions)}`,
-                `AI added / removed: ${compact(data.ai.ai_additions)} / ${compact(data.ai.ai_deletions)}`,
-                `Human added / removed: ${compact(data.ai.human_additions)} / ${compact(data.ai.human_deletions)}`,
-                `AI input tokens: ${compact(data.ai.ai_input_tokens)}`, `Cached input: ${compact(data.ai.ai_cached_input_tokens)}`,
-                `AI output tokens: ${compact(data.ai.ai_output_tokens)}`, `AI sessions: ${compact(data.ai.ai_sessions)}`,
-                `AI prompts: ${compact(data.ai.ai_prompt_events_total)}`,
-                `Estimated AI cost: $${data.ai.ai_model_total_cost.toFixed(2)}`,
-                `Prompt characters: ${compact(data.ai.ai_prompt_length_sum)}`,
-                `Average prompt: ${Math.round(data.ai.ai_prompt_events_total ? data.ai.ai_prompt_length_sum / data.ai.ai_prompt_events_total : 0)} chars`
-              ];
-              const row = make('div', 'row');
-              const columns = [make('section', 'largeable-column-fields'), make('section', 'largeable-column-fields')];
-              fields.forEach((field, index) => columns[index % 2].append(make('div', 'field', field)));
-              row.append(...columns);
-              section.append(row);
-              const modelTotal = data.models.reduce((sum, model) => sum + model.lines, 0);
-              const costTotal = data.models.reduce((sum, model) => sum + model.cost, 0);
-              const charts = [
-                ['Language activity', data.languages], ['Code editors', data.editors],
-                ['Operating systems', data.os], ['Activity categories', data.categories],
-                ['Public projects', data.projects], ['Daily activity', data.daily],
-                ['AI models by line changes', data.models.map(model => ({name: model.name, percent: modelTotal ? model.lines * 100 / modelTotal : 0}))],
-                ['Estimated AI cost by model', data.models.map(model => ({name: model.name, percent: costTotal ? model.cost * 100 / costTotal : 0, cost: model.cost}))]
-              ];
-              for (let index = 0; index < charts.length; index += 2) {
-                const chartRow = make('div', 'row');
-                for (const [title, entries] of charts.slice(index, index + 2)) {
-                  const chart = make('section', 'column chart');
-                  chart.append(make('h3', '', title));
-                  const bars = make('div', 'chart-bars horizontal');
-                  for (const item of entries) {
-                    const entry = make('div', 'entry');
-                    if (item.seconds !== undefined) entry.title = duration(item.seconds);
-                    const bar = make('div', 'bar');
-                    const percent = Math.max(0, Math.min(100, item.percent));
-                    bar.style.width = `${percent * 0.8}%`;
-                    bar.style.backgroundColor = `var(--color-calendar-graph-day-L${Math.max(1, Math.ceil(percent / 25))}-bg)`;
-                    entry.append(make('span', 'name', item.name), bar,
-                      make('span', 'value', item.cost === undefined ? `${Math.round(percent)}%` : `$${item.cost.toFixed(2)}`));
-                    bars.append(entry);
-                  }
-                  if (!entries.length) bars.append(make('div', 'empty', 'No activity in this period'));
-                  chart.append(bars);
-                  chartRow.append(chart);
-                }
-                section.append(chartRow);
-              }
-              document.querySelector('footer').before(section);
-            }
           plugin_languages: 'yes'
           plugin_languages_details: percentage
           plugin_languages_sections: most-used
@@ -264,6 +194,102 @@ jobs:
           plugins_errors_fatal: 'yes'
           retries: 2
           retries_delay: 30
+
+      - name: Render WakaTime summaries
+        if: steps.credentials.outputs.available == 'true' && steps.wakatime.outputs.available == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          WAKATIME_PAYLOAD: ${{ steps.wakatime.outputs.payload }}
+        with:
+          script: |
+            const data = JSON.parse(Buffer.from(process.env.WAKATIME_PAYLOAD, 'base64').toString('utf8'));
+            const target = {...context.repo, path: 'github-metrics.svg', ref: 'main'};
+            const {data: file} = await github.rest.repos.getContent(target);
+            if (Array.isArray(file) || !file.content) throw new Error('The generated GitHub metrics SVG is required.');
+            const original = Buffer.from(file.content, 'base64').toString('utf8');
+            let svg = original.replace(/<!-- WAKATIME:START -->[\s\S]*?<!-- WAKATIME:END -->/g, '')
+              .replace(/<style id="wakatime-summary-style"[\s\S]*?<\/style>/g, '');
+            const root = svg.match(/<svg\b[^>]*>/)?.[0];
+            const baseHeight = Number(root?.match(/data-wakatime-base-height="(\d+)"/)?.[1]
+              || root?.match(/\bheight="(\d+)"/)?.[1]);
+            if (!baseHeight || !svg.includes('<footer')) throw new Error('The classic metrics layout could not be verified.');
+            const escape = value => String(value).replace(/[&<>"']/g, character => ({
+              '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
+            }[character]));
+            const duration = seconds => {
+              const minutes = Math.floor(seconds / 60);
+              return minutes >= 60 ? `${Math.floor(minutes / 60)} hrs ${minutes % 60} mins` : `${minutes} mins`;
+            };
+            const compact = value => new Intl.NumberFormat('en', {notation: 'compact', maximumFractionDigits: 1}).format(value);
+            const fields = [
+              `Total: ${duration(data.total_seconds)}`, `Today: ${duration(data.today_seconds)}`,
+              `Daily average: ${duration(data.daily_average)}`, `Active days: ${data.active_days} / 7`,
+              `Best day: ${data.best_day.name}`, `Best day time: ${duration(data.best_day.seconds)}`,
+              `AI line changes: ${compact(data.ai.ai_additions + data.ai.ai_deletions)}`,
+              `Human line changes: ${compact(data.ai.human_additions + data.ai.human_deletions)}`,
+              `AI added / removed: ${compact(data.ai.ai_additions)} / ${compact(data.ai.ai_deletions)}`,
+              `Human added / removed: ${compact(data.ai.human_additions)} / ${compact(data.ai.human_deletions)}`,
+              `AI input tokens: ${compact(data.ai.ai_input_tokens)}`, `Cached input: ${compact(data.ai.ai_cached_input_tokens)}`,
+              `AI output tokens: ${compact(data.ai.ai_output_tokens)}`, `AI sessions: ${compact(data.ai.ai_sessions)}`,
+              `AI prompts: ${compact(data.ai.ai_prompt_events_total)}`, `Estimated AI cost: $${data.ai.ai_model_total_cost.toFixed(2)}`,
+              `Prompt characters: ${compact(data.ai.ai_prompt_length_sum)}`,
+              `Average prompt: ${Math.round(data.ai.ai_prompt_events_total ? data.ai.ai_prompt_length_sum / data.ai.ai_prompt_events_total : 0)} chars`
+            ];
+            const modelTotal = data.models.reduce((sum, model) => sum + model.lines, 0);
+            const costTotal = data.models.reduce((sum, model) => sum + model.cost, 0);
+            const charts = [
+              ['Language activity', data.languages], ['Code editors', data.editors],
+              ['Operating systems', data.os], ['Activity categories', data.categories],
+              ['Public projects', data.projects], ['Daily activity', data.daily],
+              ['AI models by line changes', data.models.map(model => ({name: model.name, percent: modelTotal ? model.lines * 100 / modelTotal : 0}))],
+              ['Estimated AI cost by model', data.models.map(model => ({name: model.name, percent: costTotal ? model.cost * 100 / costTotal : 0, cost: model.cost}))]
+            ];
+            const layout = {heading: 24, field: 20, chartGap: 12, chartHeading: 24, entry: 20, top: 12, bottom: 8};
+            let sectionHeight = layout.heading + Math.ceil(fields.length / 2) * layout.field;
+            const chartMarkup = [];
+            for (let index = 0; index < charts.length; index += 2) {
+              const pair = charts.slice(index, index + 2);
+              sectionHeight += layout.chartGap + layout.chartHeading + Math.max(...pair.map(([, entries]) => Math.max(entries.length, 1))) * layout.entry;
+              chartMarkup.push(`<div class="waka-chart-row">${pair.map(([title, entries]) =>
+                `<div class="waka-chart"><h3>${escape(title)}</h3><div class="waka-bars">${entries.length ? entries.map(item => {
+                  const percent = Math.max(0, Math.min(100, item.percent));
+                  const value = item.cost === undefined ? `${Math.round(percent)}%` : `$${item.cost.toFixed(2)}`;
+                  return `<div class="entry" title="${escape(item.seconds === undefined ? value : duration(item.seconds))}"><span class="name" title="${escape(item.name)}">${escape(item.name)}</span><span class="waka-track"><span class="waka-bar" style="width:${percent.toFixed(4)}%"></span></span><span class="value">${escape(value)}</span></div>`;
+                }).join('') : '<div class="waka-empty">No activity in this period</div>'}</div></div>`
+              ).join('')}</div>`);
+            }
+            const style = `<style id="wakatime-summary-style" type="text/css"><![CDATA[
+            .wakatime-summary{display:block!important;box-sizing:border-box;margin:${layout.top}px 0 0!important;padding:0!important;height:${sectionHeight}px;font-family:inherit;font-size:13px;line-height:20px;color:inherit}
+            .wakatime-summary h2{height:${layout.heading}px;line-height:${layout.heading}px;padding:0!important;margin:0!important;font-size:16px;font-weight:400;color:#00f}
+            .wakatime-summary .waka-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:12px}
+            .wakatime-summary .waka-field{height:${layout.field}px;line-height:${layout.field}px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .wakatime-summary .waka-chart-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:12px;margin-top:${layout.chartGap}px}
+            .wakatime-summary h3{height:${layout.chartHeading}px;line-height:${layout.chartHeading}px;margin:0!important;padding:0!important;font-size:13px;font-weight:400;color:#00f}
+            .wakatime-summary .entry{display:grid;grid-template-columns:minmax(0,95px) minmax(0,1fr) 43px;column-gap:4px;height:${layout.entry}px;line-height:${layout.entry}px;margin:0;padding:0;align-items:center}
+            .wakatime-summary .name{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+            .wakatime-summary .value{text-align:right;white-space:nowrap;font-size:11px}
+            .wakatime-summary .waka-track{display:block;height:7px;border-radius:2px;background:rgba(68,149,74,.12)}
+            .wakatime-summary .waka-bar{display:block;height:7px;border-radius:2px;background:#44954a}
+            .wakatime-summary .waka-empty{height:${layout.entry}px;line-height:${layout.entry}px;font-size:12px}
+            ]]></style>`;
+            const markup = `<!-- WAKATIME:START --><section class="wakatime-summary"><h2>WakaTime (last 7 days, including today)</h2><div class="waka-fields">${fields.map(field => `<div class="waka-field" title="${escape(field)}">${escape(field)}</div>`).join('')}</div>${chartMarkup.join('')}</section><!-- WAKATIME:END -->`;
+            const height = baseHeight + layout.top + sectionHeight + layout.bottom;
+            svg = svg.replace(/<svg\b[^>]*>/, tag => {
+              let updated = tag.replace(/\bheight="\d+"/, `height="${height}"`);
+              if (!updated.includes('data-wakatime-base-height=')) updated = updated.replace(/>$/, ` data-wakatime-base-height="${baseHeight}">`);
+              return updated;
+            }).replace('</defs>', `</defs>${style}`).replace('<footer', `${markup}<footer`);
+            if (!svg.includes('class="wakatime-summary"') || !svg.includes(`Total: ${duration(data.total_seconds)}`)) {
+              throw new Error('The completed WakaTime card did not pass its content check.');
+            }
+            if (svg !== original) {
+              await github.rest.repos.createOrUpdateFileContents({
+                ...context.repo, path: target.path, branch: 'main', sha: file.sha,
+                message: 'Update WakaTime summaries in profile metrics [Skip GitHub Action]',
+                content: Buffer.from(svg).toString('base64')
+              });
+            }
+            core.info(`Published WakaTime summaries: ${duration(data.total_seconds)} including today; ${charts.length} complete distributions.`);
 
       - name: Add generated metrics to the profile
         if: steps.credentials.outputs.available == 'true'
@@ -276,6 +302,12 @@ jobs:
             });
             if (Array.isArray(metrics) || metrics.type !== 'file' || !metrics.size) {
               throw new Error('A generated metrics image is required before updating the README.');
+            }
+            if ('${{ steps.wakatime.outputs.available }}' === 'true') {
+              const image = Buffer.from(metrics.content, 'base64').toString('utf8');
+              if (!image.includes('class="wakatime-summary"') || !image.includes('including today')) {
+                throw new Error('The WakaTime section is missing from the generated card.');
+              }
             }
             const { data: file } = await github.rest.repos.getContent({
               ...repo, path: 'README.md'
