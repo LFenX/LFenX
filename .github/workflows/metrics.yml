@@ -76,64 +76,95 @@ jobs:
         with:
           script: |
             core.setOutput('available', 'false');
-            const token = process.env.WAKATIME_TOKEN;
+            const token = process.env.WAKATIME_TOKEN?.trim();
             if (!token) {
-              core.notice('Configure a WakaTime OAuth token with read_stats scope as WAKATIME_TOKEN to display coding activity. GitHub statistics remain enabled.');
+              core.notice('Configure WAKATIME_TOKEN with read_summaries to display WakaTime activity. GitHub statistics remain enabled.');
               return;
             }
+            const dateParts = Object.fromEntries(new Intl.DateTimeFormat('en', {
+              timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit'
+            }).formatToParts(new Date()).map(part => [part.type, part.value]));
+            const end = `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+            const start = new Date(Date.parse(`${end}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
+            const query = new URLSearchParams({start, end, timezone: 'Asia/Singapore'});
             let response;
             try {
-              response = await fetch('https://api.wakatime.com/api/v1/users/current/stats/last_7_days', {
-                headers: { Authorization: `Bearer ${token}` },
-                signal: AbortSignal.timeout(30000)
+              response = await fetch(`https://api.wakatime.com/api/v1/users/current/summaries?${query}`, {
+                headers: {Authorization: `Bearer ${token}`}, signal: AbortSignal.timeout(30000)
               });
             } catch {
-              throw new Error('WakaTime statistics could not be reached. The current card is preserved.');
+              throw new Error('WakaTime daily summaries could not be reached. The current card is preserved.');
             }
             if (!response.ok) {
-              throw new Error(`WakaTime statistics returned HTTP ${response.status}. Check the OAuth token and read_stats scope. The current card is preserved.`);
+              throw new Error(`WakaTime daily summaries returned HTTP ${response.status}. WAKATIME_TOKEN needs read_summaries. The current card is preserved.`);
             }
-            const { data: stats } = await response.json();
-            const total = stats?.total_seconds_including_other_language ?? stats?.total_seconds;
-            if (!stats || !Number.isFinite(total) || total < 0) {
-              throw new Error('WakaTime did not return valid activity statistics. The current card is preserved.');
+            let source;
+            try { source = await response.json(); }
+            catch { throw new Error('WakaTime returned an invalid summary response. The current card is preserved.'); }
+            if (!Array.isArray(source.data) || source.data.length !== 7) {
+              throw new Error('Seven daily WakaTime summaries are required. The current card is preserved.');
             }
-            for (const project of stats.projects || []) {
-              if (typeof project.name === 'string' && project.name) {
-                core.setSecret(project.name);
+            const days = source.data;
+            const dates = new Set();
+            for (const day of days) {
+              const date = day.range?.date;
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || date < start || date > end || dates.has(date)
+                  || !Number.isFinite(day.grand_total?.total_seconds) || day.grand_total.total_seconds < 0) {
+                throw new Error('WakaTime returned inconsistent summary dates or activity totals. The current card is preserved.');
               }
+              dates.add(date);
             }
-            if (stats.is_up_to_date === false) {
-              core.notice('WakaTime is still processing recent activity; the card will use the latest available statistics.');
+            const total = days.reduce((sum, day) => sum + day.grand_total.total_seconds, 0);
+            if (Number.isFinite(source.cumulative_total?.seconds) && Math.abs(total - source.cumulative_total.seconds) > 1) {
+              throw new Error('WakaTime cumulative and daily totals disagree. The current card is preserved.');
             }
-            core.info('WakaTime stats diagnostic: ' + JSON.stringify({
-              username: stats.username, range: stats.range, start: stats.start, end: stats.end,
-              timezone: stats.timezone, status: stats.status, is_up_to_date: stats.is_up_to_date,
-              percent_calculated: stats.percent_calculated, total_seconds: total,
-              languages: stats.languages?.length, editors: stats.editors?.length,
-              projects: stats.projects?.length
-            }));
-            if (total === 0) {
-              for (const range of ['all_time', 'last_30_days']) {
-                const probe = await fetch(`https://api.wakatime.com/api/v1/users/current/stats/${range}`, {
-                  headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30000)
-                });
-                if (!probe.ok) {
-                  core.info(`WakaTime ${range} diagnostic: HTTP ${probe.status}`);
-                  continue;
+            const repos = await github.paginate(github.rest.repos.listForUser, {
+              username: 'LFenX', type: 'owner', per_page: 100
+            });
+            const publicNames = new Set(repos.filter(repo => !repo.private && repo.owner?.login?.toLowerCase() === 'lfenx')
+              .map(repo => repo.name.toLowerCase()));
+            const number = value => Number.isFinite(value) && value >= 0 ? value : 0;
+            const sumField = key => days.reduce((sum, day) => sum + number(day.grand_total[key]), 0);
+            function series(key, publicOnly = false) {
+              const sums = new Map();
+              for (const day of days) {
+                for (const item of day[key] || []) {
+                  if (typeof item.name !== 'string' || (publicOnly && !publicNames.has(item.name.toLowerCase()))) continue;
+                  sums.set(item.name, (sums.get(item.name) || 0) + number(item.total_seconds));
                 }
-                const { data: sample } = await probe.json();
-                core.info(`WakaTime ${range} diagnostic: ` + JSON.stringify({
-                  username: sample?.username, range: sample?.range, start: sample?.start, end: sample?.end,
-                  status: sample?.status, is_up_to_date: sample?.is_up_to_date,
-                  total_seconds: sample?.total_seconds_including_other_language ?? sample?.total_seconds,
-                  languages: sample?.languages?.length, editors: sample?.editors?.length,
-                  keys: Object.keys(sample || {})
-                }));
+              }
+              const denominator = publicOnly ? total : [...sums.values()].reduce((sum, seconds) => sum + seconds, 0);
+              return [...sums].map(([name, seconds]) => ({name, seconds, percent: denominator ? seconds * 100 / denominator : 0}))
+                .sort((a, b) => b.seconds - a.seconds || a.name.localeCompare(b.name));
+            }
+            const models = new Map();
+            for (const day of days) {
+              const metrics = day.grand_total;
+              for (const key of new Set([...Object.keys(metrics.ai_model_line_changes || {}), ...Object.keys(metrics.ai_model_costs || {})])) {
+                const model = models.get(key) || {name: key, lines: 0, cost: 0};
+                model.lines += number(metrics.ai_model_line_changes?.[key]);
+                model.cost += number(metrics.ai_model_costs?.[key]);
+                models.set(key, model);
               }
             }
-            core.info('WakaTime statistics are available. Only public GitHub project names will be displayed.');
+            const activeDays = days.filter(day => day.grand_total.total_seconds > 0).length;
+            const daily = days.map(day => ({name: day.range.date, seconds: day.grand_total.total_seconds,
+              percent: total ? day.grand_total.total_seconds * 100 / total : 0}));
+            const payload = {
+              start, end, total_seconds: total,
+              today_seconds: days.find(day => day.range.date === end)?.grand_total.total_seconds || 0,
+              daily_average: activeDays ? total / activeDays : 0, active_days: activeDays,
+              best_day: [...daily].sort((a, b) => b.seconds - a.seconds)[0], daily,
+              languages: series('languages'), editors: series('editors'), os: series('operating_systems'),
+              categories: series('categories'), projects: series('projects', true),
+              ai: Object.fromEntries(['ai_additions', 'ai_deletions', 'human_additions', 'human_deletions',
+                'ai_input_tokens', 'ai_cached_input_tokens', 'ai_output_tokens', 'ai_prompt_events_total',
+                'ai_prompt_length_sum', 'ai_sessions', 'ai_model_total_cost'].map(key => [key, sumField(key)])),
+              models: [...models.values()].sort((a, b) => b.lines - a.lines || a.name.localeCompare(b.name))
+            };
+            core.setOutput('payload', Buffer.from(JSON.stringify(payload)).toString('base64'));
             core.setOutput('available', 'true');
+            core.info(`WakaTime summaries verified: ${days.length} days, ${Math.floor(total / 3600)}h ${Math.floor(total % 3600 / 60)}m including today; ${payload.projects.length} public projects.`);
 
       - name: Generate GitHub metrics
         if: steps.credentials.outputs.available == 'true'
@@ -155,20 +186,81 @@ jobs:
             const contributionNote = [...document.querySelectorAll('footer > span')]
               .find(element => element.textContent.startsWith('These metrics '));
             contributionNote?.remove();
+            const encodedWakaTime = '${{ steps.wakatime.outputs.payload }}';
+            if (encodedWakaTime) {
+              const data = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(encodedWakaTime), char => char.charCodeAt(0))));
+              const make = (tag, className, text) => {
+                const node = document.createElement(tag);
+                if (className) node.className = className;
+                if (text !== undefined) node.textContent = text;
+                return node;
+              };
+              const duration = seconds => {
+                const minutes = Math.floor(seconds / 60);
+                return minutes >= 60 ? `${Math.floor(minutes / 60)} hrs ${minutes % 60} mins` : `${minutes} mins`;
+              };
+              const compact = value => new Intl.NumberFormat('en', {notation: 'compact', maximumFractionDigits: 1}).format(value);
+              const section = make('section', 'wakatime-summary');
+              section.append(make('h2', 'field', 'WakaTime (last 7 days, including today)'));
+              const fields = [
+                `Total: ${duration(data.total_seconds)}`, `Today: ${duration(data.today_seconds)}`,
+                `Daily average: ${duration(data.daily_average)}`, `Active days: ${data.active_days} / 7`,
+                `Best day: ${data.best_day.name}`, `Best day time: ${duration(data.best_day.seconds)}`,
+                `AI line changes: ${compact(data.ai.ai_additions + data.ai.ai_deletions)}`,
+                `Human line changes: ${compact(data.ai.human_additions + data.ai.human_deletions)}`,
+                `AI added / removed: ${compact(data.ai.ai_additions)} / ${compact(data.ai.ai_deletions)}`,
+                `Human added / removed: ${compact(data.ai.human_additions)} / ${compact(data.ai.human_deletions)}`,
+                `AI input tokens: ${compact(data.ai.ai_input_tokens)}`, `Cached input: ${compact(data.ai.ai_cached_input_tokens)}`,
+                `AI output tokens: ${compact(data.ai.ai_output_tokens)}`, `AI sessions: ${compact(data.ai.ai_sessions)}`,
+                `AI prompts: ${compact(data.ai.ai_prompt_events_total)}`,
+                `Estimated AI cost: $${data.ai.ai_model_total_cost.toFixed(2)}`,
+                `Prompt characters: ${compact(data.ai.ai_prompt_length_sum)}`,
+                `Average prompt: ${Math.round(data.ai.ai_prompt_events_total ? data.ai.ai_prompt_length_sum / data.ai.ai_prompt_events_total : 0)} chars`
+              ];
+              const row = make('div', 'row');
+              const columns = [make('section', 'largeable-column-fields'), make('section', 'largeable-column-fields')];
+              fields.forEach((field, index) => columns[index % 2].append(make('div', 'field', field)));
+              row.append(...columns);
+              section.append(row);
+              const modelTotal = data.models.reduce((sum, model) => sum + model.lines, 0);
+              const costTotal = data.models.reduce((sum, model) => sum + model.cost, 0);
+              const charts = [
+                ['Language activity', data.languages], ['Code editors', data.editors],
+                ['Operating systems', data.os], ['Activity categories', data.categories],
+                ['Public projects', data.projects], ['Daily activity', data.daily],
+                ['AI models by line changes', data.models.map(model => ({name: model.name, percent: modelTotal ? model.lines * 100 / modelTotal : 0}))],
+                ['Estimated AI cost by model', data.models.map(model => ({name: model.name, percent: costTotal ? model.cost * 100 / costTotal : 0, cost: model.cost}))]
+              ];
+              for (let index = 0; index < charts.length; index += 2) {
+                const chartRow = make('div', 'row');
+                for (const [title, entries] of charts.slice(index, index + 2)) {
+                  const chart = make('section', 'column chart');
+                  chart.append(make('h3', '', title));
+                  const bars = make('div', 'chart-bars horizontal');
+                  for (const item of entries) {
+                    const entry = make('div', 'entry');
+                    if (item.seconds !== undefined) entry.title = duration(item.seconds);
+                    const bar = make('div', 'bar');
+                    const percent = Math.max(0, Math.min(100, item.percent));
+                    bar.style.width = `${percent * 0.8}%`;
+                    bar.style.backgroundColor = `var(--color-calendar-graph-day-L${Math.max(1, Math.ceil(percent / 25))}-bg)`;
+                    entry.append(make('span', 'name', item.name), bar,
+                      make('span', 'value', item.cost === undefined ? `${Math.round(percent)}%` : `$${item.cost.toFixed(2)}`));
+                    bars.append(entry);
+                  }
+                  if (!entries.length) bars.append(make('div', 'empty', 'No activity in this period'));
+                  chart.append(bars);
+                  chartRow.append(chart);
+                }
+                section.append(chartRow);
+              }
+              document.querySelector('footer').before(section);
+            }
           plugin_languages: 'yes'
           plugin_languages_details: percentage
           plugin_languages_sections: most-used
           plugin_languages_indepth: 'no'
           plugin_languages_limit: 8
-          plugin_wakatime: ${{ steps.wakatime.outputs.available == 'true' }}
-          plugin_wakatime_token: ${{ secrets.WAKATIME_TOKEN }}
-          plugin_wakatime_url: https://api.wakatime.com
-          plugin_wakatime_user: current
-          plugin_wakatime_days: 7
-          plugin_wakatime_sections: time, projects, projects-graphs, languages, languages-graphs, editors, editors-graphs, os, os-graphs
-          plugin_wakatime_limit: 0
-          plugin_wakatime_languages_other: 'yes'
-          plugin_wakatime_repositories_visibility: public
           plugins_errors_fatal: 'yes'
           retries: 2
           retries_delay: 30
