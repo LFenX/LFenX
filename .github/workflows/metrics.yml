@@ -303,12 +303,28 @@ jobs:
             if (Array.isArray(metrics) || metrics.type !== 'file' || !metrics.size) {
               throw new Error('A generated metrics image is required before updating the README.');
             }
+            const originalImage = Buffer.from(metrics.content, 'base64').toString('utf8');
+            const footer = originalImage.match(/<footer\b[^>]*>[\s\S]*?<\/footer>/)?.[0];
+            const updatedAt = footer?.match(/Last updated ([^<()]+) \((?:timezone Asia\/Singapore|Singapore time, UTC\+08:00)\)/)?.[1];
+            if (!updatedAt) {
+              throw new Error('The generated footer must use Asia/Singapore.');
+            }
+            const image = originalImage.replace(footer,
+              `<footer><span>Last updated ${updatedAt} (Singapore time, UTC+08:00)</span></footer>`);
             if ('${{ steps.wakatime.outputs.available }}' === 'true') {
-              const image = Buffer.from(metrics.content, 'base64').toString('utf8');
               if (!image.includes('class="wakatime-summary"') || !image.includes('including today')) {
                 throw new Error('The WakaTime section is missing from the generated card.');
               }
             }
+            if (image !== originalImage) {
+              await github.rest.repos.createOrUpdateFileContents({
+                ...context.repo, path: 'github-metrics.svg', branch: 'main', sha: metrics.sha,
+                message: 'Keep the Singapore-time profile footer [Skip GitHub Action]',
+                content: Buffer.from(image).toString('base64')
+              });
+            }
+            core.info('Profile footer verified: Singapore time (UTC+08:00); contribution note removed.');
+            const { data: revision } = await github.rest.repos.getCommit(repo);
             const { data: file } = await github.rest.repos.getContent({
               ...repo, path: 'README.md'
             });
@@ -316,8 +332,12 @@ jobs:
               throw new Error('README.md is not an editable file.');
             }
             const readme = Buffer.from(file.content, 'base64').toString('utf8');
-            if (!readme.includes('](github-metrics.svg)')) {
-              const updated = readme.trimEnd() + '\n\n![GitHub metrics](github-metrics.svg)\n';
+            const imageReference = `![GitHub metrics](https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/${revision.sha}/github-metrics.svg)`;
+            const existingImage = /!\[GitHub metrics\]\([^)]+\)/;
+            const updated = existingImage.test(readme)
+              ? readme.replace(existingImage, imageReference)
+              : readme.trimEnd() + '\n\n' + imageReference + '\n';
+            if (updated !== readme) {
               await github.rest.repos.createOrUpdateFileContents({
                 ...context.repo,
                 path: 'README.md',
