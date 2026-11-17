@@ -4,4 +4,4 @@
 - Exploring AI-driven possibilities in gaming, productivity, and learning.
 - Website: [lfen.ink](https://lfen.ink)
 
-![GitHub metrics](https://raw.githubusercontent.com/LFenX/LFenX/4d329cf5131b817eff03366dc9d221aa7a710d39/github-metrics.svg)
+![GitHub metrics](https://raw.githubusercontent.com/LFenX/LFenX/8a3e5c438cf1a273dc067c7cdf79d4b09647a97e/github-metrics.svg)
